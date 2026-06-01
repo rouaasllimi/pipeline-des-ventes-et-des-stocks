@@ -3,7 +3,7 @@
 cd /d "%~dp0"
 
 echo Running ETL...
-python etl_sales.py
+python etl_ventes.py
 
 echo ETL done. Waiting 10 seconds before refreshing Power BI...
 timeout /t 10
