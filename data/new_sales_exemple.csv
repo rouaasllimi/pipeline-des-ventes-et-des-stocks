@@ -1,0 +1,5 @@
+reference_vente,produit_id,client_id,date_complete,quantite_vendue,prix_unitaire
+WEB-2026-0001,1,1,2026-05-28,2,9.99
+WEB-2026-0002,6,4,2026-05-28,5,6.49
+WEB-2026-0003,3,2,2026-05-29,10,0.15
+WEB-2026-0004,4,9,2026-05-29,1,45.00

@@ -1,113 +1,191 @@
-# Tableau de bord automatisé des ventes et des stocks
+# 📈 Pipeline ETL et tableau de bord des ventes et des stocks
 
-## Vue d’ensemble
+Pipeline de données qui importe des ventes quotidiennes depuis un fichier CSV, les contrôle, met à jour le stock, génère l'alerte de réapprovisionnement et alimente un tableau de bord Power BI.
 
-Ce projet construit un pipeline entièrement automatisé qui ingère des ventes quotidiennes, met à jour les niveaux de stock, génère des alertes de réapprovisionnement et rafraîchit un tableau de bord Power BI – le tout sans intervention manuelle. Il illustre la conception de bases de données, le développement ETL, l’automatisation et la business intelligence.
+> **Ce projet prolonge le [Inventaire_management_system] : il réutilise sa base `BaseInventaire` (produits, fournisseurs, mouvements de stock) et y ajoute un entrepôt de ventes en schéma en étoile.
+
+
+
+---
+
+## Architecture
+
+```
+new_sales.csv ──► etl_ventes.py ──► fait_ventes ──► Power BI (analyse des ventes)
+ (ventes du jour)  ├─ validation        │
+                   ├─ rejets (CSV)      └─► mouvements_stock ──► vw_stock_actuel ──► Power BI (stock)
+                   ├─ archivage                                        │
+                   └─ alerte stock ◄───────────────────────────────────┘
+                      (exports/stock_faible_AAAA-MM-JJ.csv)
+```
+
+---
 
 ## Fonctionnalités
 
-- Base de données relationnelle avec un schéma en étoile (dimensions : date, client, produit, fournisseur ; fait : ventes)
-- Script Python ETL qui lit les ventes depuis un fichier CSV, évite les doublons et enregistre les mouvements de stock
-- Exécution quotidienne automatisée via le Planificateur de tâches Windows
-- Export d’un rapport CSV des articles en stock faible
-- Tableau de bord Power BI montrant les tendances des ventes, les meilleurs clients, les alertes stock et une matrice fournisseur / mois
-- Rafraîchissement automatique de Power BI après l’ETL (via COM automation)
+- **Entrepôt de données en étoile** : table de faits `fait_ventes`, dimensions `dim_temps` et `dim_client`, produits et fournisseurs issus du projet 1
+- **ETL Python** avec contrôle qualité : produit/client inconnu, date invalide, quantité ou prix incohérent, doublons
+- **Import transactionnel** : toutes les ventes d'un fichier sont enregistrées, ou aucune
+- **Traçabilité** : chaque vente importée crée un mouvement de stock lié (`mouvements_stock.id_vente`)
+- **Rejets documentés** : les lignes refusées sont exportées avec le motif du refus
+- **Alerte de stock faible** quotidienne en CSV, qui tient compte des commandes déjà en cours
+- **Journalisation** dans `logs/` et code de retour exploitable par le Planificateur de tâches
+- **Tableau de bord Power BI** : évolution du CA, top clients, état des stocks, CA par fournisseur et par mois
 
-## Technologies utilisées
+---
 
-- **Base de données** : Microsoft SQL Server (T-SQL)
-- **ETL** : Python (pandas, pyodbc, pywin32)
-- **Business Intelligence** : Power BI Desktop
+## Modèle de données
+
+```
+dim_temps (date_complete PK) ──┐
+                               ├──< fait_ventes >── produits ── fournisseurs   (projet 1)
+dim_client (client_id PK) ─────┘        │
+                                        └──< mouvements_stock (id_vente)
+```
+
+| Table | Rôle |
+
+| `fait_ventes` | Une ligne par vente : produit, client, date, quantité, prix au moment de la vente, montant (colonne calculée) |
+| `dim_temps` | Calendrier 2024-2027 (année, trimestre, mois, jour, week-end, libellé de mois pour le tri) |
+| `dim_client` | Clients avec segment (Grand compte, PME, E-commerce, Marketplace) et pays |
+| `vw_ventes` | Vue qui joint les ventes à leurs axes d'analyse (utilisée par `queries.sql`) |
+
+---
+
+## Contrôle qualité et idempotence
+
+| Cas | Traitement |
+
+| Référence de vente déjà en base ou répétée dans le fichier | **Doublon ignoré** (le fichier peut être rejoué sans risque) |
+| Produit ou client inconnu | Ligne **rejetée** |
+| Date invalide, hors calendrier ou mal formatée | Ligne **rejetée** |
+| Quantité non entière ou ≤ 0, prix négatif ou illisible | Ligne **rejetée** |
+| Erreur technique en cours d'import | **Rollback** : aucune vente n'est enregistrée |
+| Stock négatif après import | **Avertissement** dans le journal |
+
+L'unicité est garantie par la base elle-même (`UNIQUE` sur `reference_vente`), pas seulement par le script. Les doublons sont détectés par une **clé naturelle** (numéro de facture / ligne de commande) plutôt que par comparaison de tous les champs, qui aurait écarté à tort deux ventes légitimes identiques.
+
+---
+
+## Technologies
+
+- **Base de données** : Microsoft SQL Server (T‑SQL : CTE récursive, fonctions de fenêtrage, vues, contraintes)
+- **ETL** : Python 3 (`pandas`, `pyodbc`)
+- **Business Intelligence** : Power BI Desktop (modèle en étoile, DAX)
 - **Ordonnancement** : Planificateur de tâches Windows
-- **Gestion de version** : Git / GitHub
+
+---
 
 ## Structure du projet
 
 ```
-sales-inventory-pipeline/
+projet2_ventes/
 ├── sql/
-│   ├── create_tables.sql          # Toutes les instructions CREATE TABLE
-│   ├── dim_temps_populate.sql     # Remplissage de la dimension date (2024-2027)
-│   └── sample_data.sql            # Produits, fournisseurs, clients, stock initial
+│   ├── create_tables.sql           # Dimensions, table de faits, lien stock, vue vw_ventes
+│   ├── dim_temps_population.sql    # Calendrier 2024-2027 (requête ensembliste)
+│   ├── data.sql                    # Clients et historique de ventes de test
+│   └── queries.sql                 # 7 requêtes d'analyse commerciale
 ├── python/
-│   ├── etl_sales.py               # Script ETL principal (CSV avec anti-doublon)
-│   ├── refresh_powerbi.py         # Ouvre le .pbix, rafraîchit, sauvegarde et ferme
-│   └── daily_pipeline.bat         # Fichier batch pour exécuter ETL puis Power BI
-├── powerbi/
-│   └── dashboard.pbix             # Rapport Power BI (ou captures dans /docs)
+│   ├── config.py                   # Configuration (variables d'environnement)
+│   ├── etl_ventes.py               # ETL : validation, import transactionnel, alerte
+│   └── requirements.txt
+├── data/
+│   └── new_sales_exemple.csv       # Modèle de fichier d'entrée
 ├── docs/
-│   ├── dashboard_screenshot.png
-│   └── low_stock_sample.csv
-├── requirements.txt               # Dépendances Python
+│   └── dashboard_screenshot.png
+├── dashboard/
+│   └── Ventes_Stocks.pbix
+├── pipeline_quotidien.bat          # Lance l'ETL (à planifier)
+├── .env.example
 └── README.md
 ```
 
-## Instructions d’installation
+---
+
+## Installation
+
+### Prérequis
+
+- Le **projet 1 installé** (base `BaseInventaire` avec ses tables et la vue `vw_stock_actuel`)
+- Python 3.9+ et l'[ODBC Driver 17 for SQL Server](https://learn.microsoft.com/fr-fr/sql/connect/odbc/download-odbc-driver-for-sql-server)
+- Power BI Desktop (pour ouvrir le tableau de bord)
 
 ### 1. Base de données
 
-- Installez SQL Server (Express fonctionne) et SQL Server Management Studio (SSMS).
-- Exécutez `sql/create_tables.sql` pour créer la base `BaseInventaire` et toutes les tables.
-- Exécutez `sql/dim_temps_populate.sql` pour remplir la dimension date (2024-2027).
-- Exécutez `sql/sample_data.sql` pour insérer les produits, fournisseurs, clients et mouvements initiaux.
+Dans SSMS, exécuter dans cet ordre :
 
-### 2. Environnement Python
+1. `sql/create_tables.sql`
+2. `sql/dim_temps_population.sql` (attendu : 1 461 jours)
+3. `sql/data.sql` (attendu : **1 793,89 €** de CA et **194** unités)
 
-- Téléchargez et installez WinPython (ou toute distribution Python 3.13+).
-- Installez les paquets requis :
+> Si vous relancez le script du projet 1, il supprime aussi `fait_ventes` : réexécutez ensuite les trois scripts ci-dessus.
 
-```cmd
-pip install pandas pyodbc pywin32
+### 2. Python
+
+```bash
+pip install -r python/requirements.txt
 ```
 
-- Adaptez la chaîne de connexion dans `etl_sales.py` si nécessaire (nom du serveur, authentification).
+Copier `.env.example` en `.env` et adapter le nom du serveur si besoin.
 
-### 3. Rapport Power BI
+---
 
-- Ouvrez `powerbi/dashboard.pbix` dans Power BI Desktop.
-- Changez la source de données pour pointer vers votre base `BaseInventaire`.
-- Si besoin, modifiez la variable `pbix_path` dans `refresh_powerbi.py` avec le chemin vers votre fichier `.pbix`.
+## Utilisation
 
-### 4. Automatisation
+### Format du fichier d'entrée
 
-- Placez les trois scripts Python (`etl_sales.py`, `refresh_powerbi.py`) et le fichier batch (`daily_pipeline.bat`) dans le même dossier.
-- Modifiez `daily_pipeline.bat` pour utiliser le bon chemin vers `python.exe` s’il n’est pas dans votre PATH.
-- Créez une tâche dans le Planificateur de tâches Windows qui exécute `daily_pipeline.bat` chaque matin à l’heure souhaitée (par exemple 8h00).
+Déposer un fichier `data/new_sales.csv` (voir `data/new_sales_exemple.csv`) avec ces colonnes :
 
-### 5. Utilisation
+| Colonne | Description |
+|---|---|
+| `reference_vente` | Identifiant unique de la vente (n° de facture ou de ligne) |
+| `produit_id` | Identifiant du produit (table `produits`) |
+| `client_id` | Identifiant du client (table `dim_client`) |
+| `date_complete` | Date de la vente, format `AAAA-MM-JJ` |
+| `quantite_vendue` | Entier strictement positif |
+| `prix_unitaire` | Prix de vente (le point ou la virgule sont acceptés) |
 
-- Placez un fichier `new_sales.csv` dans le même dossier avec les colonnes suivantes :  
-  `produit_id, client_id, date_complete, quantite_vendue, prix_unitaire`
-- Testez manuellement le batch : double-cliquez sur `daily_pipeline.bat`.
-- Après une exécution réussie, le CSV des stocks faibles apparaît et le rapport Power BI est automatiquement rafraîchi.
+Les séparateurs `,` et `;` sont détectés automatiquement.
 
-## Fonctionnement du script ETL
+### Lancer le pipeline
 
-- Lit les ventes depuis `new_sales.csv`.
-- Pour chaque ligne, vérifie si une vente identique existe déjà dans `fait_ventes` (prévention des doublons).
-- Insère uniquement les nouvelles ventes dans la table de faits et une ligne `VENTE` correspondante dans `mouvements_stock` (quantité négative).
-- Après traitement, renomme le fichier CSV en `processed_YYYY-MM-DD_new_sales.csv` pour éviter un nouveau traitement.
-- Calcule les niveaux de stock actuels et exporte un CSV des produits dont le stock est inférieur au seuil de réapprovisionnement.
+```bash
+python python/etl_ventes.py
+```
+ou double-cliquer sur `pipeline_quotidien.bat`. Après exécution :
+
+- les ventes valides sont dans `fait_ventes` et `mouvements_stock`
+- le CSV traité est déplacé dans `data/archives/`
+- les lignes refusées sont dans `data/rejets/`
+- l'alerte est dans `exports/stock_faible_AAAA-MM-JJ.csv`
+- le détail est dans `logs/etl_AAAA-MM-JJ.log`
+
+### Planification quotidienne
+
+Planificateur de tâches Windows → Créer une tâche de base → déclencheur quotidien (ex. 8 h 00) → action « Démarrer un programme » → `pipeline_quotidien.bat`. Un code de retour 1 signale l'échec de l'ETL.
+
+---
 
 ## Tableau de bord Power BI
 
-Le tableau de bord contient :
+Le fichier `dashboard/Ventes_Stocks.pbix` se connecte à la base `BaseInventaire` en **mode Import** avec un modèle en étoile : `fait_ventes` au centre, reliée à `dim_temps`, `dim_client` et `vw_stock_actuel` (produits et fournisseurs).
 
-- **Cartes** : Total des ventes, quantité vendue, stock moyen
-- **Graphique linéaire** : Évolution des ventes dans le temps (hiérarchie de dates)
-- **Graphique à barres** : Top 5 des clients par chiffre d’affaires
-- **Tableau** : Stock produit, seuil, et indicateur alerte (rouge/vert)
-- **Matrice** : Ventes par fournisseur et par mois
+Il présente :
 
-## Exemple de CSV des stocks faibles
+- **Cartes** : chiffre d'affaires, quantité vendue, stock moyen
+- **Courbe** : évolution du CA par mois
+- **Barres** : top 5 des clients par CA
+- **Tableau** : stock, seuil et indicateur d'alerte par produit
+- **Matrice** : CA par fournisseur et par mois
 
-```
-produit_nom,stock_actuel,seuil_reapprovisionnement,fournisseur_nom,email_contact
-"Widget A",3,15,"Global Supplies","orders@globalsupplies.com"
-"Sensor Pro X",5,12,"Metro Wholesale","sales@metrowholesale.com"
-```
+Après un import de ventes, cliquer sur **Actualiser** dans Power BI Desktop pour recharger les données.
 
+---
 
-## Licence
+## Limites et pistes d'amélioration
 
-Ce projet est destiné à un portfolio. Vous êtes libre de l’utiliser et de l’adapter avec mention de l’auteur.
+- **Actualisation de Power BI** : en Desktop elle est manuelle. En production, publier le rapport sur le **service Power BI** avec une **passerelle de données** pour planifier l'actualisation automatique après l'ETL.
+- Chargement incrémental et import en masse (`executemany`, table de transit) pour de gros volumes
+- Tests unitaires de la fonction `valider` (déjà isolée de la base pour s'y prêter)
+- Dimension produit dédiée avec historique des prix
+- Notification par email en cas d'échec de l'ETL
